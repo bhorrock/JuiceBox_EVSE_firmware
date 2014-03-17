@@ -3,7 +3,7 @@ EMotorWerks JuiceBox - an open-source 15kW EVSE
 
 Micro-Controller: Arduino Pro Mini 5V, (based on a ATmega328P-PU microcontroller)
 
-this version is matching V8.0-8.3 boards
+this version is matching V8.0-8.7 boards
 
 Basic code structure:
 Startup:
@@ -36,7 +36,7 @@ GNU General Public License for more details: http://www.gnu.org/licenses/
 */
 
 //------------------------------ MAIN SWITCHES -----------------------------------
-#define DEBUG 1 // this results in many additional printouts
+// #define DEBUG 1 // this results in many additional printouts
 // the following results in much more frequent reporting of data by JuiceBox to EmotorWerks servers
 // PLEASE DO NOT USE in your JuiceBox UNLESS AUTHORIZED BY EMotorWerks - this overloads our servers
 // and slows down the system for everyone. JuiceBoxes that consistently report more frequently than 
@@ -44,18 +44,19 @@ GNU General Public License for more details: http://www.gnu.org/licenses/
 // #define DEBUG_WIFI 
 #define AC1075
 const int R_C=120; // this is the value of the shunting resistor. see datasheet for the right value. 
-const int V_AC_threshold=120; // normally 164
+const int V_AC_threshold=160; // normally 164 (midpoint between 120V and 208V
 // #define CT_8349-1500
 // #define CT_8420-1000
 // #define CT_3100
 // #define JB_WiFi // is WiFi installed & we are using WiFlyHQ library?
- #define JB_WiFi_simple // is WiFi installed and we are just pushing data?
+// #define JB_WiFi_simple // is WiFi installed and we are just pushing data?
 // #define LCD_SGC // old version of the u144 LCD - used in some early JuiceBoxes
 //#define PCB_81 // 8.1 version of the PCB
  #define PCB_83 // 8.3+ version of the PCB, includes 8.6, 8.7 versions
- #define VerStr "V8.6.5" // detailed exact version of firmware (thanks Gregg!)
+ #define VerStr "V8.7.0" // detailed exact version of firmware (thanks Gregg!)
  #define GFI // need to be uncommented for GFI functionality
-// #define trim120current
+ #define trim120current
+// #define BuzzerIndication // indicate charging states via buzzer - only on V8.7 and higher
 //------------------------------- END MAIN SWITCHES ------------------------------
 
 #include <Arduino.h>
@@ -133,6 +134,7 @@ const byte pin_sTX=4; // SoftSerial TX - used for LCD or WiFi (default)
 const byte pin_GFI=3; 
 const byte pin_inRelay=5; 
 const byte pin_ctrlBtn=6; // control button, pulled down to GND
+const byte pin_buzzer=13; // 2kHz buzzer
 const byte pin_ctrlBtn2=8; // control button, pulled down to GND
 const byte pin_PWM=9; // J pilot PWM pin
 
@@ -147,10 +149,6 @@ const byte pin_GFItest=12; // pin wired to a GFCI-tripping relay - for the perio
 //============= NON-VOLATILE INFO  =====
 struct config_t {
   unsigned long energy; // total energy during lifetime, in kWHr
-  // sensor config
-  float Vcal;
-  float Vcal_k;
-  float Ccal;
   int day;
   int hour;
   int mins;
@@ -247,6 +245,40 @@ const int meas_cycle_delay=100; // in ms
   WiFly wifly;
 #endif
 
+
+//-------------------------------------- BUZZER CODE -----------------------------------------------------
+int tmr2cnt = 0;
+int tmr2cnt2 = 0;
+int tmr2th=0; // this defines frequency of beeps; 0 disables the beeps altogether
+
+ISR(TIMER2_COMPA_vect) { //timer2 interrupt 8kHz toggles pin
+  tmr2cnt++;
+  tmr2cnt2++;
+  
+  // disable buzzer by this one
+  if(tmr2th==0) {
+    digitalWrite(pin_buzzer, LOW);
+    return;
+  }
+  
+  if((tmr2cnt2%tmr2th)>tmr2th/2) {
+    if(tmr2cnt==15) {
+      digitalWrite(pin_buzzer,HIGH);
+    }
+    
+    if(tmr2cnt>16) {
+      digitalWrite(pin_buzzer,LOW);
+      tmr2cnt = 0;
+    }
+  } else {
+    digitalWrite(pin_buzzer,LOW);
+  }
+  
+  if(tmr2cnt2>tmr2th) tmr2cnt2=0; // reset to zero on overflow
+}
+//-------------------------------------- END BUZZER CODE -------------------------------------------------
+
+
 void setup() {
   // set digital input pins
   pinMode(pin_GFI, INPUT);
@@ -258,11 +290,31 @@ void setup() {
   pinMode(pin_inRelay, OUTPUT);
   // pinMode(pin_WPS, OUTPUT); // do NOT do this if there is a remote installed!
   pinMode(pin_GFItest, OUTPUT);
+  pinMode(pin_buzzer, OUTPUT);
+
+  //---------------------------------- set up timers
+  cli();//stop interrupts
 
   // use Timer1 library to set PWM frequency 
   // 10-bit PWM resolution
   Timer1.initialize(1000); // 1kHz for J1772
   Timer1.pwm(pin_PWM, 0); 
+  
+  //set timer2 interrupt at 8kHz
+  TCCR2A = 0;// set entire TCCR2A register to 0
+  TCCR2B = 0;// same for TCCR2B
+  TCNT2  = 0;//initialize counter value to 0
+  // set compare match register for 8khz increments
+  OCR2A = 249;// = (16*10^6) / (8000*8) - 1 (must be <256)
+  // turn on CTC mode
+  TCCR2A |= (1 << WGM21);
+  // Set CS21 bit for 8 prescaler
+  TCCR2B |= (1 << CS21);   
+  // enable timer compare interrupt
+  TIMSK2 |= (1 << OCIE2A);
+
+  sei();
+  //---------------------------------- end timer setup
   
   // initialize the clock - assume no RTC and that we are getting turned on at the hour
   int day=5, hour=12, tenmins=0, timeout=5000; // default day is Sat, time is noon, 0 min, timeout is 5s
@@ -1023,7 +1075,7 @@ void myclrScreen() {
   if(LCD_on) {
     myLCD->clrScreen();
   } else {
-    Serial.println("");
+    Serial.println("\n");
   }
   printTime();
 }
@@ -1173,5 +1225,4 @@ void getSavingsPerKWH(int gascost, int mpg, int ecost, int whpermile) {
 void delaySecs(int secs) {
   for(int si=0; si<secs; si++) delay(1000);
 }
-
 
